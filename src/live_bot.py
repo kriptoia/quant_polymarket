@@ -1,6 +1,16 @@
 import os
 import sys
 
+# Auto-execute inside the virtual environment if it exists and we aren't already in it
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+venv_python_win = os.path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe')
+venv_python_unix = os.path.join(ROOT_DIR, '.venv', 'bin', 'python')
+venv_python = venv_python_win if os.path.exists(venv_python_win) else venv_python_unix
+
+if os.path.exists(venv_python) and os.path.abspath(sys.executable) != os.path.abspath(venv_python):
+    import subprocess
+    sys.exit(subprocess.call([venv_python] + sys.argv))
+
 # Configure UTF-8 encoding for stdout/stderr to prevent UnicodeEncodeError on Windows
 if sys.platform.startswith('win'):
     try:
@@ -125,14 +135,19 @@ def run_live_bot():
             if not orderbook:
                 necesita_rotacion = True
             else:
-                best_bid = float(orderbook.get('bids', [{'price': 0}])[0]['price'])
-                best_ask = float(orderbook.get('asks', [{'price': 1}])[0]['price'])
-                spread = best_ask - best_bid
-                
-                # Ignorar sistemáticamente patrón bid 0 / ask 1 o spread inoperable
-                if best_bid == 0 or best_ask >= 0.99 or spread > 0.15:
-                    logger.warning(f"⚠️ Fiesta Vacía detectada (Bid: {best_bid}, Ask: {best_ask}, Spread: {spread:.2f}).")
+                bids = orderbook.get('bids', [])
+                asks = orderbook.get('asks', [])
+                if not bids or not asks:
                     necesita_rotacion = True
+                else:
+                    best_bid = float(bids[-1]['price'])
+                    best_ask = float(asks[-1]['price'])
+                    spread = best_ask - best_bid
+                    
+                    # Ignorar sistemáticamente patrón bid 0 / ask 1 o spread inoperable
+                    if best_bid == 0 or best_ask >= 0.99 or spread > 0.15:
+                        logger.warning(f"⚠️ Fiesta Vacía detectada (Bid: {best_bid}, Ask: {best_ask}, Spread: {spread:.2f}).")
+                        necesita_rotacion = True
 
             if necesita_rotacion:
                 logger.info("🔄 Iniciando rotación automática hacia un token BTC vivo...")
@@ -162,14 +177,19 @@ def run_live_bot():
                 )
 
                 if tamaño_inversion > 0:
-                    # G. DISPARO VIRTUAL (PAPER TRADE) Y ALERTA TELEGRAM
+                    # G. DISPARO VIRTUAL E INYECCIÓN DE TÍTULO PARA TELEGRAM
                     print("\n" + "="*50)
                     print("🚨 ¡ANOMALÍA DETECTADA! DISPARANDO ORDEN 🚨")
                     print("="*50 + "\n")
                     
+                    # Llamamos a la función auxiliar para obtener el título en este preciso momento
+                    titulo_mercado = polymarket.get_market_title_by_token(TOKEN_ID_OBJETIVO)
+                    
                     # Construir el mensaje formateado para Telegram
                     mensaje_tg = (
                         f"🚨 <b>¡GANGA MATEMÁTICA DETECTADA!</b> 🚨\n\n"
+                        f"🎯 <b>Mercado:</b> {titulo_mercado}\n"
+                        f"🔑 <b>Token ID:</b> <code>{TOKEN_ID_OBJETIVO}</code>\n"
                         f"📈 <b>Lado a operar:</b> Comprar {oportunidad['side']}\n"
                         f"🧠 <b>Probabilidad IA:</b> {prob_yes*100:.2f}%\n"
                         f"🧑‍🤝‍🧑 <b>Prob. Mercado:</b> {oportunidad['prob_mercado']*100:.2f}%\n"
@@ -196,4 +216,3 @@ def run_live_bot():
 
 if __name__ == "__main__":
     run_live_bot()
-    

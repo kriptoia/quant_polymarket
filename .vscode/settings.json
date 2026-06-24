@@ -1,3 +1,7 @@
 {
+<<<<<<< HEAD
   "editor.fontFamily": "'Victor Mono', Consolas, 'Courier New', monospace"
+=======
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+>>>>>>> d3d7ccefbf3e00cbbdcc17beeac511822335785e
 }

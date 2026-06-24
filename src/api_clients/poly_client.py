@@ -14,9 +14,6 @@ class PolymarketClient:
         self.session = requests.Session()
 
     def get_orderbook(self, token_id):
-        """
-        Descarga el libro de órdenes (Orderbook) actual para un token específico.
-        """
         try:
             url = f"{self.clob_url}/book?token_id={token_id}"
             response = self.session.get(url, timeout=10)
@@ -30,9 +27,6 @@ class PolymarketClient:
             return None
 
     def find_active_btc_token(self):
-        """
-        Búsqueda básica de un token de Bitcoin activo (Fallback).
-        """
         try:
             url = f"{self.gamma_url}/events?limit=100&active=true"
             response = self.session.get(url, timeout=10)
@@ -46,7 +40,7 @@ class PolymarketClient:
                         token_ids_raw = mercado.get('clobTokenIds', '[]')
                         token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
                         if token_ids and len(token_ids) >= 2:
-                            return token_ids[0] # Devuelve el YES del primer mercado que encuentre
+                            return token_ids[0]
             return None
         except Exception as e:
             logger.error(f"Error buscando token básico: {e}")
@@ -60,34 +54,47 @@ class PolymarketClient:
         logger.info("Radar Quant: Escaneando Polymarket en busca de liquidez real...")
         
         try:
-            url = f"{self.gamma_url}/events?limit=100&active=true"
-            response = self.session.get(url, timeout=10)
-            eventos = response.json()
+            queries = ["Bitcoin", "BTC"]
+            events_by_slug = {}
             
-            for evento in eventos:
+            for q in queries:
+                url = f"{self.gamma_url}/public-search?q={q}"
+                response = self.session.get(url, timeout=10)
+                if response.status_code == 200:
+                    results = response.json()
+                    for e in results.get('events', []):
+                        slug = e.get('slug')
+                        if slug and slug not in events_by_slug:
+                            events_by_slug[slug] = e
+            
+            for slug, evento in events_by_slug.items():
                 titulo = evento.get('title', '')
+                mercados = evento.get('markets', [])
                 
-                # Filtramos eventos de Bitcoin 
-                if 'Bitcoin' in titulo or 'BTC' in titulo:
-                    mercados = evento.get('markets', [])
-                    for mercado in mercados:
-                        token_ids_raw = mercado.get('clobTokenIds', '[]')
-                        token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                for mercado in mercados:
+                    if not mercado.get('active') or mercado.get('closed'):
+                        continue
                         
-                        if token_ids and len(token_ids) >= 2:
-                            token_yes = token_ids[0]
-                            
-                            # EVALUACIÓN DE LÍQUIDEZ EN TIEMPO REAL
-                            ob = self.get_orderbook(token_yes)
-                            if ob:
-                                best_bid = float(ob.get('bids', [{'price': 0}])[0]['price'])
-                                best_ask = float(ob.get('asks', [{'price': 1}])[0]['price'])
+                    token_ids_raw = mercado.get('clobTokenIds', '[]')
+                    token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                    
+                    if token_ids and len(token_ids) >= 2:
+                        token_yes = token_ids[0]
+                        
+                        # EVALUACIÓN DE LÍQUIDEZ EN TIEMPO REAL
+                        ob = self.get_orderbook(token_yes)
+                        if ob:
+                            bids = ob.get('bids', [])
+                            asks = ob.get('asks', [])
+                            if bids and asks:
+                                best_bid = float(bids[-1]['price'])
+                                best_ask = float(asks[-1]['price'])
                                 spread = best_ask - best_bid
                                 
                                 # LA REGLA DE ORO DEL QUANT:
                                 # Tiene que haber alguien comprando, alguien vendiendo barato, y un spread operable (< 15%)
                                 if best_bid > 0.01 and best_ask < 0.99 and spread <= 0.15:
-                                    logger.info(f"✅ Mercado Líquido Encontrado: '{titulo}'")
+                                    logger.info(f"✅ Mercado Líquido Encontrado: '{titulo}' -> '{mercado.get('question')}'")
                                     logger.info(f"   📊 Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.3f}")
                                     return token_yes
             
@@ -97,3 +104,27 @@ class PolymarketClient:
         except Exception as e:
             logger.error(f"Error en el Radar Quant: {e}")
             return None
+
+    def get_market_title_by_token(self, token_id):
+        """
+        FUNCIÓN AUXILIAR: Busca pasivamente el título del mercado.
+        Solo se llama al momento de mandar Telegram.
+        """
+        try:
+            url = f"{self.gamma_url}/events?limit=200&active=true"
+            response = self.session.get(url, timeout=10)
+            eventos = response.json()
+            
+            for evento in eventos:
+                mercados = evento.get('markets', [])
+                for mercado in mercados:
+                    token_ids_raw = mercado.get('clobTokenIds', '[]')
+                    token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                    
+                    if isinstance(token_ids, list) and token_id in token_ids:
+                        return mercado.get('question', evento.get('title', 'Mercado de Bitcoin'))
+            
+            return "Título no encontrado en mercados recientes"
+        except Exception as e:
+            logger.error(f"Error buscando el título para la metadata: {e}")
+            return "Error al extraer título"

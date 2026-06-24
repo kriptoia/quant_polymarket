@@ -1,11 +1,20 @@
 import os
 import sys
+
+# Configure UTF-8 encoding for stdout/stderr to prevent UnicodeEncodeError on Windows
+if sys.platform.startswith('win'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
 import time
 import logging
 import warnings
 from datetime import datetime
 
-# Ajustar el path para permitir ejecuciones desde la raíz con `python src/live_bot.py`
+# Ajustar el path para permitir ejecuciones desde la raíz
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
@@ -13,7 +22,7 @@ if ROOT_DIR not in sys.path:
 # Importamos el notificador de Telegram
 from src.notifications.telegram_bot import send_telegram_alert
 
-# Suprimir warnings en consola (evita mensajes como NotOpenSSLWarning)
+# Suprimir warnings en consola
 warnings.filterwarnings("ignore")
 
 # Reducir ruido de logs de terceros
@@ -30,7 +39,7 @@ from src.core.model import PolymarketModel
 from src.execution.edge_calc import EdgeCalculator
 from src.execution.position_sizing import PositionSizer
 
-# Configuración de Logging para producción (Escribe en consola)
+# Configuración de Logging
 logging.basicConfig(
     level=logging.INFO, 
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -51,14 +60,10 @@ def run_live_bot():
     edge_calc = EdgeCalculator()
     sizer = PositionSizer()
 
-    # Inyectamos el Token ID real DIARIO de Bitcoin (> $64,000)
-    TOKEN_ID_OBJETIVO = "84222163613913931833893267542914376578407462311561823691273599611948719713378"
+    # Token de inicio (Puede ser cualquiera, el bot lo cambiará si no hay liquidez)
+    TOKEN_ID_OBJETIVO = "91228418858515776333909499302819175361983659611801615451798481215577008271021"
 
     bankroll_actual = BANKROLL_INICIAL
-
-    # Desactivamos temporalmente la lista de rotación automática para forzar el uso de este Token
-    tokens_list = [TOKEN_ID_OBJETIVO]
-    ROTATION_INTERVAL = 0  
 
     # 2. Fase de Calentamiento (Entrenamiento del Cerebro)
     logger.info("Fase 1: Calentando motores y descargando contexto histórico...")
@@ -77,7 +82,7 @@ def run_live_bot():
     print(" 📡 ENTRANDO A BUCLE DE ESCANEO INFINITO (24/7) 📡")
     print("==================================================\n")
 
-    # ACTIVAMOS los logs detallados para ver la matemática del Guardián (NUEVO)
+    # ACTIVAMOS los logs detallados para ver la matemática del Guardián
     logging.getLogger('src.execution.edge_calc').setLevel(logging.INFO)
     logging.getLogger('src.execution.position_sizing').setLevel(logging.INFO)
 
@@ -87,7 +92,7 @@ def run_live_bot():
         try:
             logger.info(f"--- Escaneo #{ciclo} | Capital Simulado: ${bankroll_actual:.2f} ---")
             
-            # A. Leer el mercado actual de Binance (Últimas 400 velas para evitar bugs de apertura)
+            # A. Leer el mercado actual de Binance
             df_live_raw = binance.fetch_latest_data(SYMBOL_BINANCE, TIMEFRAME, 400)
             if df_live_raw is None:
                 raise ValueError("Fallo al conectar con Binance.")
@@ -95,7 +100,7 @@ def run_live_bot():
             # B. Procesar Features
             df_live_processed = engineer.generate_synthetic_contracts(df_live_raw)
             if df_live_processed.empty:
-                logger.warning("No se generaron features válidos para los datos actuales. Reintentando en 60 segundos.")
+                logger.warning("No se generaron features válidos. Reintentando en 60 segundos.")
                 time.sleep(60)
                 continue
 
@@ -104,32 +109,45 @@ def run_live_bot():
             # Filtro de tiempo: Si el oráculo de Polymarket cierra en menos de 2 horas, es muy ruidoso
             if vela_actual['time_to_expiry'] < 120:
                 logger.warning("Contrato muy cerca de expirar (< 2h). Esperando nuevo ciclo diario.")
-                time.sleep(300) # Dormimos 5 minutos y reevaluamos
+                time.sleep(300)
                 continue
 
             # C. ¿Qué dice nuestra Inteligencia Artificial?
             prob_yes = oraculo.predict_probability(df_live_processed)
             
             # D. ¿Qué dice la multitud humana en Polymarket?
-            current_token = TOKEN_ID_OBJETIVO
-            logger.info(f"Consultando token: {current_token}")
+            logger.info(f"Consultando token actual: {TOKEN_ID_OBJETIVO}")
+            orderbook = polymarket.get_orderbook(TOKEN_ID_OBJETIVO)
             
-            orderbook = polymarket.get_orderbook(current_token)
+            # --- SISTEMA DE ROTACIÓN AUTOMÁTICA ---
+            necesita_rotacion = False
             
-            # Si se queda sin liquidez, intenta buscar uno nuevo
             if not orderbook:
-                logger.warning("Mercado de Polymarket sin liquidez o API caída. Intentando descubrir token activo alternativo...")
-                nuevo_token = polymarket.find_active_btc_token()
-                if nuevo_token and nuevo_token != current_token:
-                    logger.info(f"Token alternativo encontrado: {nuevo_token}. Actualizando objetivo.")
-                    TOKEN_ID_OBJETIVO = nuevo_token
-                    current_token = nuevo_token
-                    orderbook = polymarket.get_orderbook(current_token)
+                necesita_rotacion = True
+            else:
+                best_bid = float(orderbook.get('bids', [{'price': 0}])[0]['price'])
+                best_ask = float(orderbook.get('asks', [{'price': 1}])[0]['price'])
+                spread = best_ask - best_bid
+                
+                # Ignorar sistemáticamente patrón bid 0 / ask 1 o spread inoperable
+                if best_bid == 0 or best_ask >= 0.99 or spread > 0.15:
+                    logger.warning(f"⚠️ Fiesta Vacía detectada (Bid: {best_bid}, Ask: {best_ask}, Spread: {spread:.2f}).")
+                    necesita_rotacion = True
 
-            if not orderbook:
-                logger.warning("Mercado de Polymarket sin liquidez o API caída. Saltando ciclo.")
-                time.sleep(60)
-                continue
+            if necesita_rotacion:
+                logger.info("🔄 Iniciando rotación automática hacia un token BTC vivo...")
+                nuevo_token = polymarket.find_liquid_btc_token()
+                
+                if nuevo_token:
+                    logger.info("🎯 Target Actualizado con éxito.")
+                    TOKEN_ID_OBJETIVO = nuevo_token
+                    orderbook = polymarket.get_orderbook(TOKEN_ID_OBJETIVO)
+                else:
+                    logger.warning("Zzz... No hay mercados vivos. El bot dormirá hasta que regrese la liquidez.")
+                    ciclo += 1
+                    time.sleep(60)
+                    continue
+            # ----------------------------------------
 
             # E. El Guardián: ¿Hay una ganga matemática real?
             oportunidad = edge_calc.evaluate_opportunity(prob_yes, orderbook)
@@ -155,30 +173,27 @@ def run_live_bot():
                         f"📈 <b>Lado a operar:</b> Comprar {oportunidad['side']}\n"
                         f"🧠 <b>Probabilidad IA:</b> {prob_yes*100:.2f}%\n"
                         f"🧑‍🤝‍🧑 <b>Prob. Mercado:</b> {oportunidad['prob_mercado']*100:.2f}%\n"
-                        f"🔥 <b>Edge Neto (Ventaja Libre):</b> {oportunidad['edge']*100:.2f}%\n"
-                        f"💰 <b>Inversión (Kelly):</b> ${tamaño_inversion:.2f} USDC\n\n"
+                        f"🔥 <b>Edge Neto:</b> {oportunidad['edge']*100:.2f}%\n"
+                        f"💰 <b>Inversión:</b> ${tamaño_inversion:.2f} USDC\n\n"
                         f"🔗 <a href='https://polymarket.com/'>Abrir Polymarket</a>"
                     )
                     
-                    # Enviar la alerta al celular
                     send_telegram_alert(mensaje_tg)
                     
-                    # Para evitar que el bot se vuelva loco y compre 10 veces en el mismo minuto, 
-                    # lo hacemos dormir unos minutos.
-                    logger.info("Orden simulada y alerta de Telegram enviada. Durmiendo el bot por 5 minutos para evitar sobreexposición...")
+                    logger.info("Orden simulada y alerta de Telegram enviada. Durmiendo 5 minutos...")
                     time.sleep(300)
             else:
-                logger.info(f"Mercado eficiente. Probabilidad IA: {prob_yes:.2f} | Midprice Polymarket: {orderbook['midprice']:.2f}")
+                logger.info(f"Mercado eficiente. Probabilidad IA: {prob_yes:.2f} | Midprice Polymarket: {orderbook.get('midprice', 0.50):.2f}")
 
-            # H. Dormir el bot para no exceder los límites de la API de Binance/Polymarket
+            # H. Dormir el bot para no exceder los límites de la API
             ciclo += 1
-            time.sleep(60) # Escaneamos el mercado cada 60 segundos
+            time.sleep(60)
 
         except Exception as e:
             logger.error(f"Error en el bucle principal: {e}")
-            logger.info("Reintentando en 60 segundos para evitar colapso del sistema...")
+            logger.info("Reintentando en 60 segundos...")
             time.sleep(60)
 
 if __name__ == "__main__":
-    # Ejecutar el Orquestador
     run_live_bot()
+    

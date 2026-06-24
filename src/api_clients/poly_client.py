@@ -1,114 +1,99 @@
 import requests
-import logging
 import json
-from typing import Optional, Dict
+import logging
 
-# Configuración de un "Logger" para registrar errores profesionalmente
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class PolymarketClient:
-    """
-    Cliente para interactuar con la Gamma API (CLOB) de Polymarket.
-    Extrae liquidez y calcula el precio de consenso (Midprice).
-    """
     def __init__(self):
-        # Endpoint principal de la API pública de Polymarket
-        self.base_url = "https://clob.polymarket.com"
+        """
+        Inicializa el cliente para conectarse a las APIs de Polymarket.
+        """
+        self.clob_url = "https://clob.polymarket.com"
+        self.gamma_url = "https://gamma-api.polymarket.com"
+        self.session = requests.Session()
 
-    def get_orderbook(self, token_id: str) -> Optional[Dict[str, float]]:
+    def get_orderbook(self, token_id):
         """
-        Descarga el libro de órdenes para un token específico (YES o NO).
-        Retorna un diccionario con los precios, el spread y la liquidez.
+        Descarga el libro de órdenes (Orderbook) actual para un token específico.
         """
-        url = f"{self.base_url}/book?token_id={token_id}"
-        
         try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status() # Lanza un error si la API rechaza la conexión
-            data = response.json()
-
-            # Protección contra mercados ilíquidos (Libro vacío)
-            if not data.get('bids') or not data.get('asks'):
-                logger.warning(f"⚠️ Libro de órdenes vacío o ilíquido para el token: {token_id}")
+            url = f"{self.clob_url}/book?token_id={token_id}"
+            response = self.session.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
                 return None
-
-            # Extracción del Nivel 1 del Order Book (Mejor comprador y vendedor)
-            best_bid = float(data['bids'][0]['price'])
-            bid_size = float(data['bids'][0]['size'])
-            
-            best_ask = float(data['asks'][0]['price'])
-            ask_size = float(data['asks'][0]['size'])
-
-            # Cálculo del Midprice para evitar sesgos direccionales
-            midprice = (best_bid + best_ask) / 2.0
-            
-            # Cálculo de la fricción inmediata
-            spread = best_ask - best_bid
-
-            return {
-                "best_bid": best_bid,
-                "best_ask": best_ask,
-                "bid_size": bid_size,
-                "ask_size": ask_size,
-                "midprice": midprice,
-                "spread": spread
-            }
-
-        except requests.exceptions.RequestException as e:
-            logger.debug(f"❌ Error de conexión con Polymarket API: {e}")
+        except Exception as e:
+            logger.error(f"Error al conectar con el Orderbook de Polymarket: {e}")
             return None
 
-    def find_active_btc_token(self) -> Optional[str]:
+    def find_active_btc_token(self):
         """
-        Busca un token activo relacionado con BTC/BITCOIN usando la Gamma API.
-        Retorna el primer `clobTokenId` encontrado o `None` si no hay resultados.
+        Búsqueda básica de un token de Bitcoin activo (Fallback).
         """
-        url = "https://gamma-api.polymarket.com/events?limit=100&active=true"
         try:
-            response = requests.get(url, timeout=8)
-            response.raise_for_status()
+            url = f"{self.gamma_url}/events?limit=100&active=true"
+            response = self.session.get(url, timeout=10)
             eventos = response.json()
-
+            
             for evento in eventos:
-                titulo = evento.get('title', '').upper()
-                if 'BITCOIN' in titulo or 'BTC' in titulo:
+                titulo = evento.get('title', '')
+                if 'Bitcoin' in titulo or 'BTC' in titulo:
                     mercados = evento.get('markets', [])
                     for mercado in mercados:
                         token_ids_raw = mercado.get('clobTokenIds', '[]')
-                        if isinstance(token_ids_raw, str):
-                            try:
-                                token_ids = json.loads(token_ids_raw)
-                            except Exception:
-                                token_ids = []
-                        else:
-                            token_ids = token_ids_raw
-
-                        if token_ids and len(token_ids) >= 1:
-                            # Verificamos que el token tenga un orderbook activo
-                            for t in token_ids:
-                                try:
-                                    ob = self.get_orderbook(t)
-                                    if ob:
-                                        return t
-                                except Exception:
-                                    continue
+                        token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                        if token_ids and len(token_ids) >= 2:
+                            return token_ids[0] # Devuelve el YES del primer mercado que encuentre
+            return None
         except Exception as e:
-            logger.debug(f"No se pudo descubrir token activo BTC: {e}")
+            logger.error(f"Error buscando token básico: {e}")
+            return None
 
-        return None
-
-# --- Bloque de Prueba Rápida ---
-# Si ejecutas este archivo directamente, probará la conexión.
-if __name__ == "__main__":
-    cliente = PolymarketClient()
-    # Usamos un token_id de ejemplo (Esto cambiará en producción)
-    # Nota: Este es un ID ficticio para probar la estructura.
-    test_token_id = "21742633143463906290569050155826241533067272736897614950488156847949938836455" 
-    
-    print("Probando conexión a Polymarket...")
-    resultado = cliente.get_orderbook(test_token_id)
-    if resultado:
-        print(f"✅ Conexión Exitosa. Midprice Actual: ${resultado['midprice']:.4f}")
-        print(f"Fricción (Spread): {resultado['spread']:.4f} centavos")
+    def find_liquid_btc_token(self):
+        """
+        RADAR QUANT: Escanea Polymarket y devuelve el primer token de Bitcoin 
+        que tenga liquidez real y un spread estrecho operable.
+        """
+        logger.info("Radar Quant: Escaneando Polymarket en busca de liquidez real...")
         
+        try:
+            url = f"{self.gamma_url}/events?limit=100&active=true"
+            response = self.session.get(url, timeout=10)
+            eventos = response.json()
+            
+            for evento in eventos:
+                titulo = evento.get('title', '')
+                
+                # Filtramos eventos de Bitcoin 
+                if 'Bitcoin' in titulo or 'BTC' in titulo:
+                    mercados = evento.get('markets', [])
+                    for mercado in mercados:
+                        token_ids_raw = mercado.get('clobTokenIds', '[]')
+                        token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else token_ids_raw
+                        
+                        if token_ids and len(token_ids) >= 2:
+                            token_yes = token_ids[0]
+                            
+                            # EVALUACIÓN DE LÍQUIDEZ EN TIEMPO REAL
+                            ob = self.get_orderbook(token_yes)
+                            if ob:
+                                best_bid = float(ob.get('bids', [{'price': 0}])[0]['price'])
+                                best_ask = float(ob.get('asks', [{'price': 1}])[0]['price'])
+                                spread = best_ask - best_bid
+                                
+                                # LA REGLA DE ORO DEL QUANT:
+                                # Tiene que haber alguien comprando, alguien vendiendo barato, y un spread operable (< 15%)
+                                if best_bid > 0.01 and best_ask < 0.99 and spread <= 0.15:
+                                    logger.info(f"✅ Mercado Líquido Encontrado: '{titulo}'")
+                                    logger.info(f"   📊 Bid: {best_bid} | Ask: {best_ask} | Spread: {spread:.3f}")
+                                    return token_yes
+            
+            logger.warning("Radar Quant: Ningún mercado de BTC superó el filtro estricto de liquidez.")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error en el Radar Quant: {e}")
+            return None

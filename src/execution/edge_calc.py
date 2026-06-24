@@ -21,9 +21,12 @@ class EdgeCalculator:
         Evalúa si hay una ventaja matemática real, mostrando toda su matemática en consola.
         """
         try:
-            best_bid = orderbook.get('bids', [{'price': 0}])[0]['price']
-            best_ask = orderbook.get('asks', [{'price': 1}])[0]['price']
-            midprice = orderbook.get('midprice', 0.50)
+            bids = orderbook.get('bids', [])
+            asks = orderbook.get('asks', [])
+            
+            best_bid = float(bids[-1]['price']) if bids else 0.0
+            best_ask = float(asks[-1]['price']) if asks else 1.0
+            midprice = (best_bid + best_ask) / 2.0
             
             # Determinar el lado con mayor probabilidad teórica
             if prob_yes > 0.50:
@@ -61,7 +64,10 @@ class EdgeCalculator:
 
             # Si pasa todos los filtros, hay una oportunidad real
             logger.info("✅ ¡OPORTUNIDAD APROBADA!")
-            liquidez = orderbook.get('asks', [{'size': 0}])[0]['size'] if side == "YES" else orderbook.get('bids', [{'size': 0}])[0]['size']
+            if side == "YES":
+                liquidez = float(asks[-1]['size']) if asks else 0.0
+            else:
+                liquidez = float(bids[-1]['size']) if bids else 0.0
 
             return {
                 'side': side,

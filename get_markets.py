@@ -1,7 +1,19 @@
+import os
+import sys
+
+# Auto-execute inside the virtual environment if it exists and we aren't already in it
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+venv_python_win = os.path.join(ROOT_DIR, '.venv', 'Scripts', 'python.exe')
+venv_python_unix = os.path.join(ROOT_DIR, '.venv', 'bin', 'python')
+venv_python = venv_python_win if os.path.exists(venv_python_win) else venv_python_unix
+
+if os.path.exists(venv_python) and os.path.abspath(sys.executable) != os.path.abspath(venv_python):
+    import subprocess
+    sys.exit(subprocess.call([venv_python] + sys.argv))
+
 import requests
 import json
 import time
-import sys
 from src.api_clients.poly_client import PolymarketClient
 
 # Configure UTF-8 encoding for stdout/stderr to prevent UnicodeEncodeError on Windows
@@ -79,7 +91,19 @@ def buscar_mercados_btc(limit=2000):
 
                     ob = client.get_orderbook(t)
                     if ob:
-                        encontrados.append({'token': t, 'question': question, 'midprice': ob['midprice'], 'spread': ob['spread']})
+                        bids = ob.get('bids', [])
+                        asks = ob.get('asks', [])
+                        if bids and asks:
+                            best_bid = float(bids[-1]['price'])
+                            best_ask = float(asks[-1]['price'])
+                            midprice = (best_bid + best_ask) / 2.0
+                            spread = best_ask - best_bid
+                            encontrados.append({
+                                'token': t,
+                                'question': question,
+                                'midprice': midprice,
+                                'spread': spread
+                            })
 
         # breve pausa para no golpear la API
         time.sleep(0.2)

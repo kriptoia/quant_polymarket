@@ -15,6 +15,9 @@ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
 # Importamos nuestro módulo de alertas
 from src.notifications.telegram_bot import send_telegram_alert
 

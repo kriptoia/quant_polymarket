@@ -8,7 +8,6 @@ ccxt==4.5.59
 certifi==2026.6.17
 cffi==2.0.0
 charset-normalizer==3.4.7
-coincurve==20.0.0
 cryptography==49.0.0
 frozenlist==1.8.0
 idna==3.18

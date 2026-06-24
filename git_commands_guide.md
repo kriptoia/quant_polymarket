@@ -71,9 +71,36 @@ git checkout develop
 
 ---
 
+## 3. Corregir o Reescribir el Último Commit (Amend)
+
+Utiliza este flujo cuando hayas cometido un error en el mensaje de tu último commit o si olvidaste incluir cambios en algún archivo y no deseas generar un commit nuevo.
+
+### Caso A: Cambiar solo el mensaje del último commit (sin abrir Vim)
+Permite reescribir el texto de descripción directamente desde la terminal.
+```bash
+git commit --amend -m "tu nuevo mensaje corregido"
+```
+
+### Caso B: Añadir nuevos cambios al último commit (manteniendo el mismo mensaje)
+Agrega modificaciones recientes al commit anterior sin alterar su descripción.
+```bash
+git add .
+git commit --amend --no-edit
+```
+
+### Paso crucial: Actualizar GitHub si el commit ya se había subido
+Si ya habías hecho `push` del commit original a GitHub, deberás forzar la actualización de manera segura.
+```bash
+git push --force-with-lease origin develop
+```
+
+---
+
 ## Resumen del Flujo Completo (Cheat Sheet Rápido)
 
 | Objetivo | Comandos en orden |
 | :--- | :--- |
 | **Subir a develop** | `git status` <br> `git add .` <br> `git commit -m "mensaje"` <br> `git push origin develop` |
 | **Pasar develop a main** | `git checkout main` <br> `git pull origin main` <br> `git merge develop` <br> `git push origin main` <br> `git checkout develop` |
+| **Reescribir último commit** | `git add .` *(si hay cambios)* <br> `git commit --amend -m "nuevo mensaje"` <br> `git push --force-with-lease origin develop` |
+| **Refrescar último commit** | `git add .` <br> `git commit --amend --no-edit` <br> `git push --force-with-lease origin develop` |

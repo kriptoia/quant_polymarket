@@ -48,6 +48,8 @@ from src.core.features import FeatureEngineer
 from src.core.model import PolymarketModel
 from src.execution.edge_calc import EdgeCalculator
 from src.execution.position_sizing import PositionSizer
+from src.execution.portfolio_manager import PortfolioManager  # <--- NUEVO
+from src.execution.trade_logger import log_trade_to_csv      # <--- NUEVO
 
 # Configuración de Logging
 logging.basicConfig(
@@ -69,8 +71,11 @@ def run_live_bot():
     oraculo = PolymarketModel()
     edge_calc = EdgeCalculator()
     sizer = PositionSizer()
+    
+    # 🌟 Instanciamos al Jefe de Riesgos (60 min cooldown, max 3 entradas/día, max 10% capital)
+    portfolio = PortfolioManager(bankroll_inicial=BANKROLL_INICIAL)
 
-    # Token de inicio (Puede ser cualquiera, el bot lo cambiará si no hay liquidez)
+    # Token de inicio (Puede ser cualquiera, el bot lo cambiará si no hay liquidez o está bloqueado)
     TOKEN_ID_OBJETIVO = "91228418858515776333909499302819175361983659611801615451798481215577008271021"
 
     bankroll_actual = BANKROLL_INICIAL
@@ -126,10 +131,10 @@ def run_live_bot():
             prob_yes = oraculo.predict_probability(df_live_processed)
             
             # D. ¿Qué dice la multitud humana en Polymarket?
-            logger.info(f"Consultando token actual: {TOKEN_ID_OBJETIVO}")
+            logger.info(f"Consultando token actual: {TOKEN_ID_OBJETIVO[:15]}...")
             orderbook = polymarket.get_orderbook(TOKEN_ID_OBJETIVO)
             
-            # --- SISTEMA DE ROTACIÓN AUTOMÁTICA ---
+            # --- SISTEMA DE ROTACIÓN INTELIGENTE ---
             necesita_rotacion = False
             
             if not orderbook:
@@ -148,17 +153,37 @@ def run_live_bot():
                     if best_bid == 0 or best_ask >= 0.99 or spread > 0.15:
                         logger.warning(f"⚠️ Fiesta Vacía detectada (Bid: {best_bid}, Ask: {best_ask}, Spread: {spread:.2f}).")
                         necesita_rotacion = True
+                        
+                    # 🌟 NUEVA REGLA: Forzar rotación si el mercado actual está en Cooldown
+                    permitido, razon = portfolio.can_enter_market(TOKEN_ID_OBJETIVO, 0, 0) # Chequeo pasivo
+                    if not permitido and "cooldown" in razon:
+                        logger.info(f"⏳ El token actual está en cooldown. Forzando rotación...")
+                        necesita_rotacion = True
 
             if necesita_rotacion:
-                logger.info("🔄 Iniciando rotación automática hacia un token BTC vivo...")
+                logger.info("🔄 Iniciando rotación hacia un token BTC vivo y sin restricciones...")
+                # Aquí el bot buscará ciegamente hasta encontrar uno que no esté bloqueado
                 nuevo_token = polymarket.find_liquid_btc_token()
                 
-                if nuevo_token:
+                # Intentamos asegurarnos de que el nuevo token no esté también en cooldown
+                intentos = 0
+                while nuevo_token and intentos < 5:
+                    permitido, _ = portfolio.can_enter_market(nuevo_token, 0, 0)
+                    if permitido:
+                        break # Encontramos uno limpio!
+                    else:
+                        logger.info("El token encontrado también está en cooldown. Buscando otro...")
+                        # Truco temporal: dormimos un segundo para darle chance a la API de mezclar
+                        time.sleep(1) 
+                        nuevo_token = polymarket.find_liquid_btc_token()
+                    intentos += 1
+                
+                if nuevo_token and intentos < 5:
                     logger.info("🎯 Target Actualizado con éxito.")
                     TOKEN_ID_OBJETIVO = nuevo_token
                     orderbook = polymarket.get_orderbook(TOKEN_ID_OBJETIVO)
                 else:
-                    logger.warning("Zzz... No hay mercados vivos. El bot dormirá hasta que regrese la liquidez.")
+                    logger.warning("Zzz... No hay mercados vivos O TODOS ESTÁN EN COOLDOWN. Durmiendo...")
                     ciclo += 1
                     time.sleep(60)
                     continue
@@ -177,31 +202,50 @@ def run_live_bot():
                 )
 
                 if tamaño_inversion > 0:
-                    # G. DISPARO VIRTUAL E INYECCIÓN DE TÍTULO PARA TELEGRAM
-                    print("\n" + "="*50)
-                    print("🚨 ¡ANOMALÍA DETECTADA! DISPARANDO ORDEN 🚨")
-                    print("="*50 + "\n")
                     
-                    # Llamamos a la función auxiliar para obtener el título en este preciso momento
-                    titulo_mercado = polymarket.get_market_title_by_token(TOKEN_ID_OBJETIVO)
+                    # 🌟 PREGUNTAMOS AL JEFE DE RIESGOS ANTES DE DISPARAR
+                    permitido_operar, razon_portfolio = portfolio.can_enter_market(TOKEN_ID_OBJETIVO, oportunidad['edge'], tamaño_inversion)
                     
-                    # Construir el mensaje formateado para Telegram
-                    mensaje_tg = (
-                        f"🚨 <b>¡GANGA MATEMÁTICA DETECTADA!</b> 🚨\n\n"
-                        f"🎯 <b>Mercado:</b> {titulo_mercado}\n"
-                        f"🔑 <b>Token ID:</b> <code>{TOKEN_ID_OBJETIVO}</code>\n"
-                        f"📈 <b>Lado a operar:</b> Comprar {oportunidad['side']}\n"
-                        f"🧠 <b>Probabilidad IA:</b> {prob_yes*100:.2f}%\n"
-                        f"🧑‍🤝‍🧑 <b>Prob. Mercado:</b> {oportunidad['prob_mercado']*100:.2f}%\n"
-                        f"🔥 <b>Edge Neto:</b> {oportunidad['edge']*100:.2f}%\n"
-                        f"💰 <b>Inversión:</b> ${tamaño_inversion:.2f} USDC\n\n"
-                        f"🔗 <a href='https://polymarket.com/'>Abrir Polymarket</a>"
-                    )
-                    
-                    send_telegram_alert(mensaje_tg)
-                    
-                    logger.info("Orden simulada y alerta de Telegram enviada. Durmiendo 5 minutos...")
-                    time.sleep(300)
+                    if permitido_operar:
+                        # G. DISPARO VIRTUAL
+                        print("\n" + "="*50)
+                        print("🚨 ¡ANOMALÍA DETECTADA! DISPARANDO ORDEN 🚨")
+                        print("="*50 + "\n")
+                        
+                        titulo_mercado = polymarket.get_market_title_by_token(TOKEN_ID_OBJETIVO)
+                        
+                        mensaje_tg = (
+                            f"🚨 <b>¡GANGA MATEMÁTICA DETECTADA!</b> 🚨\n\n"
+                            f"🎯 <b>Mercado:</b> {titulo_mercado}\n"
+                            f"🔑 <b>Token ID:</b> <code>{TOKEN_ID_OBJETIVO}</code>\n"
+                            f"📈 <b>Lado a operar:</b> Comprar {oportunidad['side']}\n"
+                            f"🧠 <b>Probabilidad IA:</b> {prob_yes*100:.2f}%\n"
+                            f"🧑‍🤝‍🧑 <b>Prob. Mercado:</b> {oportunidad['prob_mercado']*100:.2f}%\n"
+                            f"🔥 <b>Edge Neto:</b> {oportunidad['edge']*100:.2f}%\n"
+                            f"💰 <b>Inversión:</b> ${tamaño_inversion:.2f} USDC\n\n"
+                            f"🔗 <a href='https://polymarket.com/'>Abrir Polymarket</a>"
+                        )
+                        
+                        send_telegram_alert(mensaje_tg)
+                        
+                        # 🌟 ACTUALIZAMOS LA MEMORIA Y EL LOG CSV
+                        portfolio.register_entry(TOKEN_ID_OBJETIVO, tamaño_inversion, oportunidad['edge'])
+                        
+                        log_trade_to_csv(
+                            mercado=titulo_mercado,
+                            token_id=TOKEN_ID_OBJETIVO,
+                            side=oportunidad['side'],
+                            prob_modelo=prob_yes,
+                            prob_mercado=oportunidad['prob_mercado'],
+                            edge_neto=oportunidad['edge'],
+                            inversion=tamaño_inversion
+                        )
+                        
+                        logger.info("Orden simulada, memoria actualizada y alerta enviada. Durmiendo 60 segundos...")
+                        # Ya no dormimos 5 minutos ciegamente. Dormimos 60s y dejamos que la rotación inteligente busque el siguiente mercado.
+                        time.sleep(60) 
+                    else:
+                        logger.info(f"🔒 Oportunidad ignorada por Portfolio Manager: {razon_portfolio}")
             else:
                 logger.info(f"Mercado eficiente. Probabilidad IA: {prob_yes:.2f} | Midprice Polymarket: {orderbook.get('midprice', 0.50):.2f}")
 

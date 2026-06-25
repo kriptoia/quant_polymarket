@@ -1,105 +1,83 @@
 import logging
-from typing import Dict, Optional
-from src.config import FEE_EFECTIVA, COLCHON_MODELO, MIN_EDGE_REQUIRED, MAX_PRICE_PAY
 
-# Configuración del Logger
 logger = logging.getLogger(__name__)
 
 class EdgeCalculator:
-    """
-    Motor de evaluación de Ventaja Matemática (Edge).
-    Ahora implementa filtros anti-favoritos (Cap de Cuota) y exige Edges gruesos.
-    """
-    def __init__(self, fee=FEE_EFECTIVA, colchon=COLCHON_MODELO, min_edge=MIN_EDGE_REQUIRED, max_price=MAX_PRICE_PAY):
-        self.fee = fee
-        self.colchon = colchon
-        self.min_edge = min_edge
-        self.max_price = max_price
+    def __init__(self, umbral_edge_minimo=0.05, max_costo_favorito=0.60):
+        """
+        umbral_edge_minimo: Ventaja matemática neta mínima para operar (ej. 5%)
+        max_costo_favorito: Precio máximo a pagar. Si cuesta > 0.60 (60c), es muy caro.
+        """
+        self.umbral_edge_minimo = umbral_edge_minimo
+        self.max_costo_favorito = max_costo_favorito
 
     def evaluate_opportunity(self, prob_yes, orderbook):
-        """
-        Evalúa si hay una ventaja matemática real, mostrando toda su matemática en consola.
-        """
-        try:
-            bids = orderbook.get('bids', [])
-            asks = orderbook.get('asks', [])
+        bids = orderbook.get('bids', [])
+        asks = orderbook.get('asks', [])
+        
+        if not bids or not asks:
+            return None
             
-            best_bid = float(bids[-1]['price']) if bids else 0.0
-            best_ask = float(asks[-1]['price']) if asks else 1.0
-            midprice = (best_bid + best_ask) / 2.0
+        # Extraemos precios base del lado YES del Orderbook
+        best_bid_yes = float(bids[-1]['price'])
+        best_ask_yes = float(asks[-1]['price'])
+        
+        # Matemáticas de Complementos de Polymarket
+        # Comprar YES cuesta el Ask de YES
+        # Comprar NO cuesta (1 - Bid de YES)
+        costo_yes = best_ask_yes
+        costo_no = 1.0 - best_bid_yes
+        
+        # Probabilidades enfrentadas del Modelo
+        prob_no = 1.0 - prob_yes
+        
+        # Calculamos la ventaja (Edge) de cada lado
+        edge_yes = prob_yes - costo_yes
+        edge_no = prob_no - costo_no
+        
+        # --- IMPRESIÓN CLARA Y TRANSPARENTE (Telemetría Quant) ---
+        logger.info("--- Radiografía Matemática (Edge) ---")
+        logger.info(f"P_Yes_Modelo = {prob_yes:.3f} | P_No_Modelo = {prob_no:.3f}")
+        logger.info(f"Costo_Yes = {costo_yes:.3f} | Costo_No = {costo_no:.3f}")
+        
+        # El bot elige el lado que tenga el mayor Edge
+        if edge_no > edge_yes:
+            lado_evaluado = "NO"
+            prob_modelo_eval = prob_no
+            costo_eval = costo_no
+            edge_eval = edge_no
+            # La liquidez de NO es el volumen pujando por YES
+            liquidez = float(bids[-1].get('size', 0))
+        else:
+            lado_evaluado = "YES"
+            prob_modelo_eval = prob_yes
+            costo_eval = costo_yes
+            edge_eval = edge_yes
+            # La liquidez de YES es el volumen ofreciendo YES
+            liquidez = float(asks[-1].get('size', 0))
+
+        # Imprimir el cálculo matemático del Lado Ganador
+        logger.info(f"Lado evaluado = {lado_evaluado}")
+        logger.info(f"Edge_Bruto_{lado_evaluado} = {prob_modelo_eval:.3f} - {costo_eval:.3f} = {edge_eval:.3f}")
+        
+        # 1er Filtro: No comprar favoritos demasiado caros
+        if costo_eval > self.max_costo_favorito:
+            logger.info(f"⚖️ RECHAZADO: Favorito demasiado caro (Precio {costo_eval:.2f} > Límite {self.max_costo_favorito:.2f})")
+            return None
             
-            # Determinar el lado con mayor probabilidad teórica
-            if prob_yes > 0.50:
-                side = "YES"
-                p_modelo = prob_yes
-                p_mercado = best_ask  # Si compramos YES, pagamos el Ask
-            else:
-                side = "NO"
-                p_modelo = 1.0 - prob_yes
-                p_mercado = 1.0 - best_bid  # Si compramos NO, pagamos la inversa del Bid
-            
-            # Cálculo estricto del Edge
-            spread = best_ask - best_bid
-            edge_bruto = p_modelo - p_mercado
-            edge_neto = edge_bruto - spread - self.fee - self.min_edge
-
-            # --- LOGS DETALLADOS (Radiografía del Guardián) ---
-            logger.info("--- Radiografía Matemática (Edge) ---")
-            logger.info(f"Lado: {side} | Bid={best_bid:.3f} | Ask={best_ask:.3f} | Mid={midprice:.3f} | Spread={spread:.3f}")
-            logger.info(f"P_Modelo={p_modelo:.3f} | P_Mercado (Costo)={p_mercado:.3f}")
-            logger.info(f"Edge_Bruto={edge_bruto:.3f} | Edge_Neto={edge_neto:.3f}")
-
-            # Filtros de rechazo con sus motivos exactos
-            motivo_no_trade = None
-            if p_mercado > self.max_price:
-                motivo_no_trade = f"Favorito demasiado caro (Precio {p_mercado:.2f} > Límite {self.max_price:.2f})"
-            elif edge_neto <= 0:
-                motivo_no_trade = f"Edge Neto Negativo o Insuficiente ({edge_neto:.3f} <= 0)"
-            elif spread > 0.10: # Límite de seguridad de spread
-                motivo_no_trade = f"Spread demasiado alto ({spread:.3f} > 0.10)"
-
-            if motivo_no_trade:
-                logger.info(f"⚖️ RECHAZADO: {motivo_no_trade}")
-                return None
-
-            # Si pasa todos los filtros, hay una oportunidad real
-            logger.info("✅ ¡OPORTUNIDAD APROBADA!")
-            if side == "YES":
-                liquidez = float(asks[-1]['size']) if asks else 0.0
-            else:
-                liquidez = float(bids[-1]['size']) if bids else 0.0
-
+        # Cálculo del Edge Neto asumiendo el spread (deslizamiento)
+        spread = best_ask_yes - best_bid_yes
+        edge_neto = edge_eval - spread
+        
+        # 2do Filtro: ¿El Edge Neto vale la pena?
+        if edge_neto >= self.umbral_edge_minimo:
+            logger.info(f"✅ Edge Neto ({edge_neto:.3f}) superó umbral. ¡OPORTUNIDAD APROBADA!")
             return {
-                'side': side,
-                'prob_mercado': p_mercado,
+                'side': lado_evaluado,
+                'prob_modelo': prob_modelo_eval,
+                'prob_mercado': costo_eval,
                 'edge': edge_neto,
                 'liquidez_disponible': liquidez
             }
-
-        except Exception as e:
-            logger.error(f"Error en EdgeCalculator: {e}")
-            return None
-
-        # Lógica de Decisión con Filtro de Precio ("Underdogs") y Edge Mínimo
-        if edge_neto_yes >= self.min_edge and midprice_yes <= self.max_price:
-            logger.info(f"🚀 GANGA DETECTADA (YES): Precio ${midprice_yes:.2f} | Edge Neto: {edge_neto_yes:.4f}")
-            return {
-                "side": "YES",
-                "edge": edge_neto_yes,
-                "prob_mercado": midprice_yes,
-                "liquidez_disponible": orderbook['ask_size']
-            }
             
-        elif edge_neto_no >= self.min_edge and midprice_no <= self.max_price:
-            logger.info(f"🩸 MERCADO SOBREVALORADO DETECTADO (Comprar NO): Precio ${midprice_no:.2f} | Edge Neto: {edge_neto_no:.4f}")
-            return {
-                "side": "NO",
-                "edge": edge_neto_no,
-                "prob_mercado": midprice_no,
-                "liquidez_disponible": orderbook['bid_size'] 
-            }
-            
-        else:
-            logger.info("⚖️ Mercado eficiente, favorito demasiado caro o edge insuficiente. NO TRADE.")
-            return None
-        
+        return None
